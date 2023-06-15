@@ -5,11 +5,12 @@ package digest
 import (
 	"context"
 	"crypto"
-	_ "crypto/md5" //nolint:gosec
+	"crypto/md5"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/shaj13/go-guardian/v2/auth"
 )
@@ -28,9 +29,42 @@ type Digest struct {
 	h     Header
 }
 
+func (d *Digest) getResponse(h Header, passwd string, method string, url string, entityBody []byte) string {
+	var (
+		A1 string
+		A2 string
+		HD string
+	)
+
+	if h.Algorithm() == "md5" {
+		A1 = h.UserName() + ":" + h.Realm() + ":" + passwd
+
+	} else if h.Algorithm() == "md5-sess" {
+		A1 = h.UserName() + ":" + h.Realm() + ":" + passwd + ":" + h.Nonce() + ":" + h.Cnonce()
+	}
+
+	if strings.Contains(h.QOP(), "auth-int") {
+		A2 = method + ":" + url + d.md5Hash(entityBody)
+		HD = h.Nonce() + ":" + h.NC() + ":" + h.Cnonce() + ":" + h.QOP()
+	} else {
+		A2 = method + ":" + url
+		HD = h.Nonce()
+	}
+
+	HA1 := d.hash(A1)
+	HA2 := d.hash(A2)
+
+	response := d.hash(HA1 + ":" + HD + ":" + HA2)
+	return response
+}
+
 // Authenticate user request and returns user info, Otherwise error.
 func (d *Digest) Authenticate(ctx context.Context, r *http.Request) (auth.Info, error) {
-	authz := r.Header.Get("Authorization")
+	var (
+		authz  = r.Header.Get("Authorization")
+		method = r.Method
+		url    = r.RequestURI
+	)
 	h := make(Header)
 
 	if err := h.Parse(authz); err != nil {
@@ -42,9 +76,7 @@ func (d *Digest) Authenticate(ctx context.Context, r *http.Request) (auth.Info, 
 		return nil, err
 	}
 
-	HA1 := d.hash(h.UserName() + ":" + h.Realm() + ":" + passwd)
-	HA2 := d.hash(r.Method + ":" + r.RequestURI)
-	HKD := d.hash(HA1 + ":" + h.Nonce() + ":" + h.NC() + ":" + h.Cnonce() + ":" + h.QOP() + ":" + HA2)
+	HKD := d.getResponse(h, passwd, method, url, nil)
 	if subtle.ConstantTimeCompare([]byte(HKD), []byte(h.Response())) != 1 {
 		return nil, ErrInvalidResponse
 	}
@@ -73,9 +105,51 @@ func (d *Digest) GetChallenge() string {
 	return str
 }
 
+// AuthenticateClient 构建客户端请求Authenticate值
+func (d *Digest) AuthenticateClient(r *http.Response, fn func(h Header), passwd string, entityBody []byte) (string, error) {
+	// 参考 https://www.jianshu.com/p/18fb07f2f65e
+	var (
+		WWWAuthenticate = r.Header.Get("WWW-Authenticate")
+		method          = r.Request.Method
+		url             = r.Request.URL.Path
+	)
+	h := make(Header)
+
+	if err := h.Parse(WWWAuthenticate); err != nil {
+		return "", err
+	}
+
+	if fn != nil {
+		fn(h)
+	}
+
+	if len(h.URI()) == 0 {
+		h.SetURI(url)
+	}
+
+	if len(h.NC()) == 0 {
+		h.SetNC("00000001")
+	}
+
+	if len(h.Cnonce()) == 0 {
+		h.SetCnonce(SecretKey())
+	}
+
+	h.SetResponse(d.getResponse(h, passwd, method, h.URI(), entityBody))
+
+	return h.Authenticate(), nil
+}
+
 func (d *Digest) hash(str string) string {
 	h := d.chash.New()
 	_, _ = h.Write([]byte(str))
+	p := h.Sum(nil)
+	return hex.EncodeToString(p)
+}
+
+func (d *Digest) md5Hash(data []byte) string {
+	h := md5.New()
+	_, _ = h.Write(data)
 	p := h.Sum(nil)
 	return hex.EncodeToString(p)
 }
@@ -91,7 +165,7 @@ func New(f FetchUser, c auth.Cache, opts ...auth.Option) *Digest {
 	d.h = make(Header)
 	d.h.SetRealm("Users")
 	d.h.SetAlgorithm("md5")
-	d.h.SetOpaque(secretKey())
+	d.h.SetOpaque(SecretKey())
 
 	for _, opt := range opts {
 		opt.Apply(d)

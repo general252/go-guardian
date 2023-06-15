@@ -12,16 +12,16 @@ import (
 var ErrInavlidHeader = errors.New("strategies/digest: Invalid Authorization Header")
 
 const (
-	username  = "username"
-	realm     = "realm"
-	uri       = "uri"
-	algorithm = "algorithm"
-	nonce     = "nonce"
-	cnonce    = "cnonce"
-	nc        = "nc"
-	qop       = "qop"
-	response  = "response"
-	opaque    = "opaque"
+	username  = "username"  // username: 用户名（网站定义）
+	realm     = "realm"     // password: 密码
+	uri       = "uri"       // uri: 请求的uri(只是path)
+	algorithm = "algorithm" // 默认是md5加密
+	nonce     = "nonce"     // nonce: 服务器发给客户端的随机的字符串
+	cnonce    = "cnonce"    // cnonce(clinetNonce): 客户端发送给服务器的随机字符串
+	nc        = "nc"        // nc(nonceCount):请求的次数，用于标记，计数，防止重放攻击
+	qop       = "qop"       // qop: 保护质量参数,一般是auth,或auth-int,这会影响摘要的算法
+	response  = "response"  // 客户端根据算法算出的摘要值, 服务器端用此验证客户端
+	opaque    = "opaque"    // 透传, 客户端原样返回
 )
 
 // Header represents The Authorization Header Field,
@@ -155,11 +155,11 @@ func (h Header) Parse(authorization string) error {
 // WWWAuthenticate return string represents HTTP WWW-Authenticate header field with Digest scheme.
 func (h Header) WWWAuthenticate() string {
 	if len(h.Nonce()) == 0 {
-		h.SetNonce(secretKey())
+		h.SetNonce(SecretKey())
 	}
 
 	if len(h.Opaque()) == 0 {
-		h.SetOpaque(secretKey())
+		h.SetOpaque(SecretKey())
 	}
 
 	h.SetQOP("auth")
@@ -171,6 +171,24 @@ func (h Header) WWWAuthenticate() string {
 		h.Opaque(),
 		h.Algorithm(),
 		h.QOP(),
+	)
+
+	return s
+}
+
+func (h Header) Authenticate() string {
+
+	s := fmt.Sprintf(`Digest username="%s",realm="%s",nonce="%s",uri="%s",algorithm=%s,qop="%s",nc="%s",cnonce="%s",response="%s",opaque="%s"`,
+		h.UserName(),
+		h.Realm(),
+		h.Nonce(),
+		h.URI(),
+		h.Algorithm(),
+		h.QOP(),
+		h.NC(),
+		h.Cnonce(),
+		h.Response(),
+		h.Opaque(),
 	)
 
 	return s
@@ -211,7 +229,7 @@ func (h Header) Clone() Header {
 	return h2
 }
 
-func secretKey() string {
+func SecretKey() string {
 	secret := make([]byte, 16)
 	_, err := rand.Read(secret)
 	if err != nil {
